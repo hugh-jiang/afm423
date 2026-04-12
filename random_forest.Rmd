@@ -1,0 +1,322 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r}
+# --- 1. Setup and Installation ---
+if(!require(tidyverse)){install.packages("tidyverse")}
+if(!require(lubridate)){install.packages("lubridate")}
+if(!require(randomForest)){install.packages("randomForest")}
+if(!require(glmnet)){install.packages("glmnet")}
+
+library(tidyverse)
+library(lubridate)
+library(randomForest)
+library(glmnet)
+
+# --- 2. Load and Prepare Fama-French Data ---
+temp <- tempfile()
+url <- "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip"
+download.file(url, temp, quiet = TRUE)
+
+# Read the monthly factors (skipping the first 3 rows of header)
+raw_ff <- read_csv(unz(temp, "F-F_Research_Data_Factors.csv"), skip = 3)
+
+ff_data <- raw_ff %>%
+  rename(date_raw = 1) %>%
+  # Filter for 6-digit dates (YYYYMM) to avoid the annual data at bottom of file
+  filter(nchar(as.character(date_raw)) == 6) %>%
+  mutate(
+    date = floor_date(ymd(paste0(date_raw, "01")), "month"),
+    Mkt_RF = as.numeric(`Mkt-RF`) / 100,
+    SMB    = as.numeric(SMB) / 100,
+    HML    = as.numeric(HML) / 100
+  ) %>%
+  select(date, Mkt_RF, SMB, HML)
+
+# --- 3. Load Primary Data and Merge ---
+load("data_ml.RData")
+
+data_ml <- data_ml %>%
+  # Standardize stock dates to the first of the month for alignment
+  mutate(date = floor_date(as.Date(date), "month")) %>%
+  filter(date > "1999-12-31", date < "2019-01-01") %>%
+  left_join(ff_data, by = "date") %>%
+  arrange(stock_id, date)
+
+# --- 4. Define Feature Sets ---
+memory_features <- c("Mom_11M_Usd")
+accounting_features <- c("Div_Yld", "Ebit_Bv")
+market_features <- c("Mkt_Cap_6M_Usd", "Pb", "Vol1Y_Usd")
+ff_features <- c("Mkt_RF", "SMB", "HML")
+
+features <- c(memory_features, accounting_features, market_features, ff_features)
+formula_reg <- as.formula(paste("R1M_Usd ~", paste(features, collapse = " + ")))
+
+# --- 5. Rolling Window Execution ---
+data_stock <- data_ml
+window_length_years <- 5
+months_in_window <- window_length_years * 12
+
+all_dates <- sort(unique(data_stock$date))
+test_dates <- all_dates[(months_in_window + 1):length(all_dates)]
+
+predictions_df <- data.frame(
+  date = as.Date(character()),
+  actual = numeric(),
+  pred_rf = numeric(),
+  pred_ols = numeric()
+)
+
+for (i in 1:length(test_dates)) {
+  current_date <- test_dates[i]
+  
+  # A. Define Training/Testing Sample first
+  train_data <- data_stock %>% filter(date < current_date) %>% tail(months_in_window)
+  test_data <- data_stock %>% filter(date == current_date)
+  
+  if(nrow(test_data) == 0 || nrow(train_data) < months_in_window) next
+  
+  # B. Prepare matrices for LASSO
+  # Use 'features' to ensure we only subset the independent variables
+  x_train_mat <- as.matrix(train_data[, features])
+  y_train_vec <- train_data$R1M_Usd
+  
+  # Fill any sparse NAs with 0 to prevent model failure
+  x_train_mat[is.na(x_train_mat)] <- 0
+  
+  # C. Post-LASSO OLS logic
+  fit_lasso_internal <- cv.glmnet(x_train_mat, y_train_vec, alpha = 1)
+  curr_coefs <- coef(fit_lasso_internal, s = "lambda.min")
+  active_vars <- rownames(curr_coefs)[which(as.numeric(curr_coefs) != 0)]
+  active_vars <- setdiff(active_vars, "(Intercept)")
+  
+  if(length(active_vars) > 0) {
+      refined_formula <- as.formula(paste("R1M_Usd ~", paste(active_vars, collapse = " + ")))
+      fit_ols <- lm(refined_formula, data = train_data)
+      pred_ols <- predict(fit_ols, test_data)
+  } else {
+      pred_ols <- rep(mean(train_data$R1M_Usd), nrow(test_data))
+  }
+  
+  # D. Random Forest
+  set.seed(42)
+  fit_rf <- randomForest(formula_reg, 
+                         data = train_data,
+                         ntree = 200, 
+                         nodesize = 500, # Increased for better generalization
+                         importance = TRUE)     
+  pred_rf <- predict(fit_rf, test_data)
+  
+  # E. Store Results
+  predictions_df <- rbind(predictions_df, data.frame(
+    date = current_date,
+    actual = test_data$R1M_Usd,
+    pred_rf = as.numeric(pred_rf),
+    pred_ols = as.numeric(pred_ols)
+  ))
+}
+
+# --- 6. Results Summary ---
+cat("--- Performance Summary ---\n")
+mse_rf <- mean((predictions_df$pred_rf - predictions_df$actual)^2)
+mse_ols <- mean((predictions_df$pred_ols - predictions_df$actual)^2)
+cat("Random Forest MSE: ", round(mse_rf, 6), "\n")
+cat("OLS Baseline MSE:  ", round(mse_ols, 6), "\n")
+```
+
+```{r}
+# Calculate MSE
+mse_rf <- mean((predictions_df$pred_rf - predictions_df$actual)^2)
+mse_ols <- mean((predictions_df$pred_ols - predictions_df$actual)^2)
+
+# Calculate Hit Ratio (Directional Accuracy)
+hit_rf <- mean(sign(predictions_df$pred_rf) == sign(predictions_df$actual))
+hit_ols <- mean(sign(predictions_df$pred_ols) == sign(predictions_df$actual))
+
+# Display Results
+# cat("Performance Summary for", target_stock, "\n")
+cat("----------------------------------\n")
+cat("Random Forest MSE: ", round(mse_rf, 6), "\n")
+cat("OLS Baseline MSE:  ", round(mse_ols, 6), "\n")
+cat("----------------------------------\n")
+cat("Random Forest Hit Ratio: ", round(hit_rf * 100, 2), "%\n")
+cat("OLS Baseline Hit Ratio:  ", round(hit_ols * 100, 2), "%\n")
+```
+
+```{r}
+# Evaluation functions
+# E1. Evaluate OOB Error Curve
+evaluate_rf_oob <- function(rf_fit, plot_curve = TRUE) {
+  if (!inherits(rf_fit, "randomForest")) stop("rf_fit must be a randomForest object.")
+  
+  if (rf_fit$type == "regression") {
+    oob_errors <- rf_fit$mse
+    ylab <- "OOB Mean Squared Error"
+  } else {
+    oob_errors <- rf_fit$err.rate[, "OOB"]
+    ylab <- "OOB Classification Error"
+  }
+  
+  final_err <- tail(oob_errors, 1)
+  stable_at <- which(abs(diff(oob_errors)) < 0.001 * final_err)[1]
+  
+  cat("Random Forest OOB diagnostics:\n")
+  cat(" Total trees grown :", length(oob_errors), "\n")
+  cat(" Final OOB error   :", round(final_err, 6), "\n")
+  cat(" Approx. plateau at:", stable_at, "trees\n")
+  
+  if (plot_curve) {
+    plot(oob_errors, type = "l", col = "steelblue", xlab = "Number of trees", 
+         ylab = ylab, main = "Random Forest: OOB Error Curve")
+  }
+  return(invisible(oob_errors))
+}
+
+# E2. Evaluate Variable Importance
+evaluate_rf_importance <- function(rf_fit, top_n = 20, plot_importance = TRUE) {
+  if (is.null(rf_fit$importance)) stop("Re-train with importance=TRUE")
+  
+  imp_mat <- importance(rf_fit)
+  imp_col <- ifelse(rf_fit$type == "regression", "%IncMSE", "MeanDecreaseAccuracy")
+  
+  imp_df <- data.frame(feature = rownames(imp_mat), importance = imp_mat[, imp_col])
+  imp_df <- imp_df[order(imp_df$importance, decreasing = TRUE), ]
+  
+  print(head(imp_df, top_n))
+  
+  if (plot_importance) {
+    top_df <- head(imp_df, top_n)
+    barplot(rev(top_df$importance), names.arg = rev(top_df$feature), 
+            horiz = TRUE, col = "steelblue", main = "RF Variable Importance")
+  }
+  return(invisible(imp_df))
+}
+
+# A1. Mean Squared Error (MSE) with Decomposition
+compute_mse <- function(y_true, y_pred) {
+  mse <- mean((y_true - y_pred)^2)
+  cat("MSE (total):", round(mse, 6), "\n")
+  cat("Note: cross-term -2E[yŷ] is most informative for portfolios\n")
+  return(invisible(mse))
+}
+
+# A3. Out-of-Sample R2 (OOS R2)
+compute_oos_r2 <- function(y_true, y_pred, include_mean_benchmark = FALSE) {
+  numerator <- sum((y_true - y_pred)^2)
+  denominator <- if (include_mean_benchmark) sum((y_true - mean(y_true))^2) else sum(y_true^2)
+  r2 <- 1 - (numerator / denominator)
+  cat("OOS R2:", round(r2, 4), "\n")
+  return(invisible(r2))
+}
+
+# A4. Hit Ratio (Directional Accuracy)
+compute_hit_ratio <- function(y_true, y_pred) {
+  hit_ratio <- mean(sign(y_pred) == sign(y_true))
+  cat("Hit ratio:", round(hit_ratio, 4), "\n")
+  return(invisible(hit_ratio))
+}
+
+# -----------------------------------------------------------------------------
+# H1. Sharpe Ratio (standard and transaction-cost adjusted)
+# -----------------------------------------------------------------------------
+compute_sharpe <- function(returns_portfolio, returns_benchmark = NULL,
+                           tc_per_unit_turnover = 0,
+                           avg_turnover = 0,
+                           annualise_factor = 12) {
+  # Arguments:
+  #   returns_portfolio      : numeric vector of portfolio monthly returns
+  #   returns_benchmark      : optional numeric vector of benchmark returns
+  #                            (for information ratio; NULL = skip)
+  #   tc_per_unit_turnover   : transaction cost per unit of turnover
+  #                            (Section 2 uses 0.005 as a conservative figure)
+  #   avg_turnover           : average monthly turnover (from compute_turnover)
+  #   annualise_factor       : multiply monthly Sharpe by sqrt of this value
+  #
+  # Returns: named numeric vector with Sharpe and related metrics
+ 
+  mu    <- mean(returns_portfolio, na.rm = TRUE)
+  sigma <- sd(returns_portfolio,   na.rm = TRUE)
+ 
+  # Raw Sharpe (monthly)
+  sharpe_raw <- mu / sigma
+ 
+  # TC-adjusted Sharpe: subtract annualised costs from numerator (Eq. 4, Section 2)
+  tc_annual  <- tc_per_unit_turnover * avg_turnover * annualise_factor
+  sharpe_tc  <- (mu - tc_per_unit_turnover * avg_turnover) / sigma
+ 
+  # Annualised versions
+  sharpe_raw_ann <- sharpe_raw * sqrt(annualise_factor)
+  sharpe_tc_ann  <- sharpe_tc  * sqrt(annualise_factor)
+ 
+  cat("Sharpe ratio diagnostics:\n")
+  cat("  Avg monthly return   :", round(mu,    4), "\n")
+  cat("  Monthly volatility   :", round(sigma, 4), "\n")
+  cat("  Sharpe (monthly)     :", round(sharpe_raw, 4), "\n")
+  cat("  Sharpe (annualised)  :", round(sharpe_raw_ann, 4), "\n")
+  cat("  Avg turnover         :", round(avg_turnover, 4), "\n")
+  cat("  TC per unit turnover :", tc_per_unit_turnover, "\n")
+  cat("  TC-adj Sharpe (ann)  :", round(sharpe_tc_ann, 4), "\n")
+ 
+  if (!is.null(returns_benchmark)) {
+    excess     <- returns_portfolio - returns_benchmark
+    info_ratio <- mean(excess, na.rm = TRUE) / sd(excess, na.rm = TRUE)
+    cat("  Information ratio    :", round(info_ratio * sqrt(annualise_factor), 4), "\n")
+    cat("  Tracking error (ann) :", round(sd(excess) * sqrt(annualise_factor), 4), "\n")
+  }
+ 
+  return(invisible(c(sharpe_raw     = sharpe_raw,
+                     sharpe_raw_ann = sharpe_raw_ann,
+                     sharpe_tc      = sharpe_tc,
+                     sharpe_tc_ann  = sharpe_tc_ann)))
+}
+ 
+```
+
+```{r}
+# --- Evaluation for Random Forest Predictions ---
+cat("--- Random Forest Performance ---\n")
+compute_mse(
+  y_true = predictions_df$actual, 
+  y_pred = predictions_df$pred_rf
+)
+
+# TODO OOS R2 is a bit weird
+#compute_oos_r2(
+ # y_true = predictions_df$actual, 
+  #y_pred = predictions_df$pred_rf, 
+  #include_mean_benchmark = TRUE  # Compare against a historical mean return
+#)
+
+compute_hit_ratio(
+  y_true = predictions_df$actual, 
+  y_pred = predictions_df$pred_rf
+)
+
+# --- Evaluation for OLS Baseline ---
+cat("\n--- OLS Baseline Performance ---\n")
+compute_mse(predictions_df$actual, predictions_df$pred_ols)
+# compute_oos_r2(predictions_df$actual, predictions_df$pred_ols, include_mean_benchmark = TRUE)
+compute_hit_ratio(predictions_df$actual, predictions_df$pred_ols)
+```
+
+```{r}
+# 1. Visualize the OOB Error Curve 
+# This helps check if 200 trees were sufficient for the error to stabilize.
+evaluate_rf_oob(fit_rf)
+
+# 2. Extract and Plot Variable Importance
+# This identifies which stock characteristics were most predictive in the latest window.
+# (Ensure importance = TRUE was used during training)
+rf_importance_results <- evaluate_rf_importance(
+  fit_rf, 
+  top_n = 15, 
+  plot_importance = TRUE
+)
+```
