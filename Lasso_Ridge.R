@@ -1,9 +1,83 @@
-library(glmnet)   # cv.glmnet for LASSO (alpha=1) and Ridge (alpha=0)
-library(dplyr)    # data manipulation
-library(tidyr)    # reshaping
+if(!require(tidyverse)){install.packages("tidyverse")}
+if(!require(lubridate)){install.packages("lubridate")}
+if(!require(zoo)){install.packages("zoo")}
+if(!require(randomForest)){install.packages("randomForest")}
+if(!require(glmnet)){install.packages("glmnet")}
+if(!require(dplyr)){install.packages("dplyr")}
+if(!require(ggplot2)){install.packages("ggplot2")}
+if(!require(tidyr)){install.packages("tidyr")}
+
+
+
+library(tidyverse)
+library(lubridate)
+library(e1071)
+library(zoo)
+library(randomForest)
+library(glmnet) # cv.glmnet for LASSO (alpha=1) and Ridge (alpha=0)
+library(dplyr)
 library(ggplot2)  # plotting
+library(tidyr)    # reshaping
+
+
+# --- 2. Load Fama-French 5-Factor Data  & HURST---
+temp <- tempfile()
+url  <- "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip"
+download.file(url, temp, quiet = TRUE)
+
+raw_ff5 <- read_csv(unz(temp, "F-F_Research_Data_5_Factors_2x3.csv"), skip = 3)
+
+ff_data <- raw_ff5 %>%
+  rename(date_raw = 1) %>%
+  filter(nchar(as.character(date_raw)) == 6) %>%
+  mutate(
+    date   = floor_date(ymd(paste0(date_raw, "01")), "month"),
+    Mkt_RF = as.numeric(`Mkt-RF`) / 100,
+    SMB    = as.numeric(SMB) / 100,
+    HML    = as.numeric(HML) / 100,
+    RMW    = as.numeric(RMW) / 100,
+    CMA    = as.numeric(CMA) / 100
+  ) %>%
+  select(date, Mkt_RF, SMB, HML, RMW, CMA)
+
+compute_hurst_rs <- function(returns_vec) {
+  n <- length(returns_vec)
+  if (n < 36 || any(is.na(returns_vec))) return(NA_real_)
+  
+  # Mean-adjusted series
+  r_demeaned <- returns_vec - mean(returns_vec)
+  
+  # Cumulative sum of mean-adjusted returns
+  cum_r <- cumsum(r_demeaned)
+  
+  # R: range of the cumulative sum
+  R <- max(cum_r) - min(cum_r)
+  
+  # S: standard deviation of the original return series
+  S <- sd(returns_vec)
+  
+  if (S == 0 || R == 0) return(NA_real_)
+  
+  # Classical R/S Hurst estimate
+  H <- log(R / S) / log(n)
+  return(H)
+}
 
 load("data_ml.RData")
+
+data_ml <- data_ml %>%
+  mutate(date = floor_date(as.Date(date), "month")) %>%
+  filter(date > "1999-12-31", date < "2019-01-01") %>%
+  left_join(ff_data, by = "date") %>%
+  arrange(stock_id, date) %>%
+  group_by(stock_id) %>%
+  mutate(
+    # Rolling 36-month Hurst exponent applied to the RETURN series.
+    # fill = NA leaves the first 35 months empty per stock.
+    # NAs are handled within the rolling loop, not dropped globally here.
+    Hurst = rollapplyr(R1M_Usd, width = 36, FUN = compute_hurst_rs, fill = NA)
+  ) %>%
+  ungroup()
 
 # ── Basic inspection ──────────────────────────────────────────────────────────
 cat("Dataset dimensions :", nrow(data_ml), "rows x", ncol(data_ml), "cols\n")
@@ -24,7 +98,13 @@ ID_COLS     <- c("date", "stock_id")              # non-feature identifier colum
 LABEL_COLS  <- c("R1M_Usd", "R3M_Usd",
                  "R6M_Usd", "R12M_Usd")          # all labels — exclude from features
 
-FEATURE_COLS <- setdiff(names(data_ml), c(ID_COLS, LABEL_COLS))
+memory_features     <- c("Mom_11M_Usd", "Hurst")
+accounting_features <- c("Div_Yld", "Ebit_Bv")
+market_features     <- c("Mkt_Cap_6M_Usd", "Pb", "Vol1Y_Usd")
+ff_features        <- c("Mkt_RF", "SMB", "HML", "RMW", "CMA")
+
+#FEATURE_COLS <- setdiff(names(data_ml), c(ID_COLS, LABEL_COLS))
+FEATURE_COLS <- c(memory_features, accounting_features, market_features, ff_features)
 cat("Number of features:", length(FEATURE_COLS), "\n")
 cat("Features:\n")
 print(FEATURE_COLS)
@@ -69,7 +149,7 @@ data_processed[, FEATURE_COLS][is.na(data_processed[, FEATURE_COLS])] <- 0
 
 # ── Rolling-window configuration ──────────────────────────────────────────────
 MIN_TRAIN_MONTHS <- 60   # minimum months before we start predicting
-LAMBDA_RULE      <- "lambda.1se"   # or "lambda.min" — keep consistent
+LAMBDA_RULE      <- "lambda.min"   # or "lambda.1se" — keep consistent
 N_CV_FOLDS       <- 5
 
 all_dates <- sort(unique(data_processed$date))
@@ -119,8 +199,8 @@ for (i in seq(MIN_TRAIN_MONTHS, n_dates - 1)) {
   if (!is.null(cv_lasso)) {
     pred_lasso   <- as.numeric(predict(cv_lasso, X_test, s = LAMBDA_RULE))
     n_nonzero    <- sum(coef(cv_lasso, s = LAMBDA_RULE) != 0) - 1L  # excl. intercept
-    lambda_lasso <- ifelse(LAMBDA_RULE == "lambda.1se",
-                           cv_lasso$lambda.1se, cv_lasso$lambda.min)
+    lambda_lasso <- ifelse(LAMBDA_RULE == "lambda.min",
+                           cv_lasso$lambda.min, cv_lasso$lambda.min)
   } else {
     pred_lasso   <- rep(NA_real_, nrow(X_test))
     n_nonzero    <- NA_integer_
@@ -141,8 +221,8 @@ for (i in seq(MIN_TRAIN_MONTHS, n_dates - 1)) {
   
   if (!is.null(cv_ridge)) {
     pred_ridge   <- as.numeric(predict(cv_ridge, X_test, s = LAMBDA_RULE))
-    lambda_ridge <- ifelse(LAMBDA_RULE == "lambda.1se",
-                           cv_ridge$lambda.1se, cv_ridge$lambda.min)
+    lambda_ridge <- ifelse(LAMBDA_RULE == "lambda.min",
+                           cv_ridge$lambda.min, cv_ridge$lambda.min)
   } else {
     pred_ridge   <- rep(NA_real_, nrow(X_test))
     lambda_ridge <- NA_real_
@@ -326,9 +406,9 @@ fit_ridge_final <- glmnet::glmnet(X_train_final, y_train_final,
                                   alpha = 0, standardize = FALSE)
 
 cat("Final-window models fit.\n")
-cat("  LASSO lambda.1se :", round(cv_lasso_final$lambda.1se, 6), "\n")
+cat("  LASSO lambda.min :", round(cv_lasso_final$lambda.min, 6), "\n")
 cat("  Non-zero coefs   :",
-    sum(coef(cv_lasso_final, s = "lambda.1se") != 0) - 1, "\n")
+    sum(coef(cv_lasso_final, s = "lambda.min") != 0) - 1, "\n")
 
 # ── 5E: Save LASSO and Ridge outputs to SEPARATE .RData files ────────────────
 # Each file is self-contained: it includes the shared matrices (X_train_final,
@@ -385,5 +465,5 @@ cat("\nLoad in Eval_Metrics.ipynb with:\n")
 cat("  load('lasso_outputs.RData')   # for LASSO evaluation\n")
 cat("  load('ridge_outputs.RData')   # for Ridge evaluation\n")
 
-load("lasso_outputs.RData")
-load("ridge_outputs.RData")
+#load("lasso_outputs.RData")
+#load("ridge_outputs.RData")
