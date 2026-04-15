@@ -467,3 +467,9 @@ cat("  load('ridge_outputs.RData')   # for Ridge evaluation\n")
 
 #load("lasso_outputs.RData")
 #load("ridge_outputs.RData")
+
+save(
+  # Predictions (Parts A, G)
+  oos_predictions,
+  file = "prediction_outputs_wFeature.RData"
+)
