@@ -102,9 +102,12 @@ memory_features     <- c("Mom_11M_Usd", "Hurst")
 accounting_features <- c("Div_Yld", "Ebit_Bv")
 market_features     <- c("Mkt_Cap_6M_Usd", "Pb", "Vol1Y_Usd")
 ff_features        <- c("Mkt_RF", "SMB", "HML", "RMW", "CMA")
+most_features <- setdiff(names(data_ml), c(ID_COLS, LABEL_COLS))
 
 #FEATURE_COLS <- setdiff(names(data_ml), c(ID_COLS, LABEL_COLS))
-FEATURE_COLS <- c(memory_features, accounting_features, market_features, ff_features)
+#FEATURE_COLS <- c(memory_features, accounting_features, market_features, ff_features)
+FEATURE_COLS <- unique(c(memory_features, accounting_features, market_features, ff_features, most_features))
+
 cat("Number of features:", length(FEATURE_COLS), "\n")
 cat("Features:\n")
 print(FEATURE_COLS)
@@ -415,61 +418,64 @@ cat("  Non-zero coefs   :",
 # X_test_final, y_train_final, y_test_final, returns_mat) so that either file
 # can be loaded independently into Eval_Metrics.ipynb without needing the other.
 
-# ── LASSO outputs → lasso_outputs.RData ──────────────────────────────────────
-save(
-  # Predictions (Parts A, G)
-  oos_predictions,      # columns used: date, stock_id, y_true, y_pred_lasso
-  
-  # Portfolio (Part H)
-  ls_returns_lasso,     # → compute_sharpe(), compute_max_drawdown()
-  weights_lasso_mat,    # → compute_turnover()
-  returns_mat,          # shared — needed by compute_turnover()
-  
-  # LASSO diagnostics (Part C)
-  cv_lasso_final,       # → select_lasso_lambda(), summarise_lasso_selection()
-  X_train_final,        # → evaluate_lasso_path()
-  y_train_final,
-  X_test_final,
-  y_test_final,
-  FEATURE_COLS,         # → summarise_lasso_selection() needs feature names
-  
-  # Feature selection over time (your report figure)
-  feature_tracking,
-  
-  file = "lasso_outputs.RData"
-)
-cat("LASSO outputs saved to lasso_outputs.RData\n")
-
-# ── Ridge outputs → ridge_outputs.RData ──────────────────────────────────────
-save(
-  # Predictions (Parts A, G)
-  oos_predictions,      # columns used: date, permno, y_true, y_pred_ridge
-  
-  # Portfolio (Part H)
-  ls_returns_ridge,     # → compute_sharpe(), compute_max_drawdown()
-  weights_ridge_mat,    # → compute_turnover()
-  returns_mat,          # shared — needed by compute_turnover()
-  
-  # Ridge diagnostics (Part D)
-  fit_ridge_final,      # → ridge_bias_variance()
-  X_train_final,        # shared — kept for symmetry / completeness
-  y_train_final,
-  X_test_final,
-  y_test_final,
-  FEATURE_COLS,
-  
-  file = "ridge_outputs.RData"
-)
-cat("Ridge  outputs saved to ridge_outputs.RData\n")
-cat("\nLoad in Eval_Metrics.ipynb with:\n")
-cat("  load('lasso_outputs.RData')   # for LASSO evaluation\n")
-cat("  load('ridge_outputs.RData')   # for Ridge evaluation\n")
+# # ── LASSO outputs → lasso_outputs.RData ──────────────────────────────────────
+# save(
+#   # Predictions (Parts A, G)
+#   oos_predictions,      # columns used: date, stock_id, y_true, y_pred_lasso
+#   
+#   # Portfolio (Part H)
+#   ls_returns_lasso,     # → compute_sharpe(), compute_max_drawdown()
+#   weights_lasso_mat,    # → compute_turnover()
+#   returns_mat,          # shared — needed by compute_turnover()
+#   
+#   # LASSO diagnostics (Part C)
+#   cv_lasso_final,       # → select_lasso_lambda(), summarise_lasso_selection()
+#   X_train_final,        # → evaluate_lasso_path()
+#   y_train_final,
+#   X_test_final,
+#   y_test_final,
+#   FEATURE_COLS,         # → summarise_lasso_selection() needs feature names
+#   
+#   # Feature selection over time (your report figure)
+#   feature_tracking,
+#   
+#   file = "lasso_outputs.RData"
+# )
+# cat("LASSO outputs saved to lasso_outputs.RData\n")
+# 
+# # ── Ridge outputs → ridge_outputs.RData ──────────────────────────────────────
+# save(
+#   # Predictions (Parts A, G)
+#   oos_predictions,      # columns used: date, permno, y_true, y_pred_ridge
+#   
+#   # Portfolio (Part H)
+#   ls_returns_ridge,     # → compute_sharpe(), compute_max_drawdown()
+#   weights_ridge_mat,    # → compute_turnover()
+#   returns_mat,          # shared — needed by compute_turnover()
+#   
+#   # Ridge diagnostics (Part D)
+#   fit_ridge_final,      # → ridge_bias_variance()
+#   X_train_final,        # shared — kept for symmetry / completeness
+#   y_train_final,
+#   X_test_final,
+#   y_test_final,
+#   FEATURE_COLS,
+#   
+#   file = "ridge_outputs.RData"
+# )
+# cat("Ridge  outputs saved to ridge_outputs.RData\n")
+# cat("\nLoad in Eval_Metrics.ipynb with:\n")
+# cat("  load('lasso_outputs.RData')   # for LASSO evaluation\n")
+# cat("  load('ridge_outputs.RData')   # for Ridge evaluation\n")
 
 #load("lasso_outputs.RData")
 #load("ridge_outputs.RData")
 
 save(
-  # Predictions (Parts A, G)
-  oos_predictions,
-  file = "prediction_outputs_wFeature.RData"
+ # Predictions (Parts A, G)
+ oos_predictions,
+ file = "prediction_outputs_wFeatureAndFF5.RData"
 )
+
+# load("prediction_outputs_wFeature.RData")
+# load("prediction_outputs_old.RData")
